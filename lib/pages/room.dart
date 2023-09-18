@@ -2,10 +2,10 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:livekit_client/livekit_client.dart';
 
 import '../exts.dart';
-import '../widgets/controls.dart';
 import '../widgets/participant.dart';
 import '../widgets/participant_info.dart';
 
@@ -29,7 +29,14 @@ class _RoomPageState extends State<RoomPage> {
   List<ParticipantTrack> participantTracks = [];
   EventsListener<RoomEvent> get _listener => widget.listener;
   bool get fastConnection => widget.room.engine.fastConnectOptions != null;
-  bool blockAutoUpdate = false;
+
+  static const pageSize = 16;
+  int currentPage = 0;
+  bool canGoNext = false;
+  bool canGoPrev = false;
+
+  bool isFocused = false;
+
   @override
   void initState() {
     super.initState();
@@ -122,29 +129,30 @@ class _RoomPageState extends State<RoomPage> {
   }
 
   void _onRoomDidUpdate() {
-    if (blockAutoUpdate) return;
     _sortParticipants();
+  }
+
+  void _trigerFocus(ParticipantTrack track) {
+    if (isFocused) {
+      isFocused = false;
+      return _sortParticipants();
+    }
+
+    setState(() {
+      isFocused = true;
+      participantTracks = [track];
+    });
   }
 
   void _onE2EEStateEvent(TrackE2EEStateEvent e2eeState) {
     print('e2ee state: $e2eeState');
   }
 
-  void _trigerFocus(ParticipantTrack track) {
-    // if there are multiple tracks, focus on the one that was tapped
-    setState(() {
-      if (participantTracks.length == 1) {
-        blockAutoUpdate = false;
-        _onRoomDidUpdate();
-        return;
-      }
-
-      blockAutoUpdate = true;
-      participantTracks = [track];
-    });
-  }
-
   void _sortParticipants() {
+    if (isFocused) {
+      return;
+    }
+
     List<ParticipantTrack> userMediaTracks = [];
     List<ParticipantTrack> screenTracks = [];
     for (var participant in widget.room.participants.values) {
@@ -223,156 +231,89 @@ class _RoomPageState extends State<RoomPage> {
       }
     }
     setState(() {
-      participantTracks = [...screenTracks, ...userMediaTracks];
+      final allTracks = [...screenTracks, ...userMediaTracks];
+
+      final participantsStartIndex = currentPage * pageSize;
+      final pagesCount = (allTracks.length / pageSize).ceil();
+
+      participantTracks =
+          allTracks.sublist(participantsStartIndex).take(pageSize).toList();
+
+      canGoNext = currentPage < pagesCount - 1;
+      canGoPrev = currentPage > 0;
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    final (columns, rows) = _getGridDimens(participantTracks.length);
-
-    return Scaffold(
-      body: _StaticGrid(
-        itemCount: participantTracks.length,
-        columns: columns,
-        rows: rows,
-        verticalSpacing: 8,
-        horizontalSpacing: 8,
-        itemBuilder: (index) {
-          final track = participantTracks[index];
-
-          return GestureDetector(
-            onTap: () => _trigerFocus(track),
-            behavior: HitTestBehavior.opaque,
-            child: ParticipantWidget.widgetFor(track),
-          );
+    return CallbackShortcuts(
+      // on arrow left/rigth go to prev/next page
+      bindings: <ShortcutActivator, VoidCallback>{
+        const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
+          if (canGoPrev) {
+            setState(() {
+              currentPage--;
+              _sortParticipants();
+            });
+          }
         },
-        emptyBuilder: () {
-          return DecoratedBox(
-            decoration: ShapeDecoration(
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
+        const SingleActivator(LogicalKeyboardKey.arrowRight): () {
+          if (canGoNext) {
+            setState(() {
+              currentPage++;
+              _sortParticipants();
+            });
+          }
+        },
+      },
+      child: Scaffold(
+        body: Stack(
+          children: [
+            GridView.builder(
+              itemCount: participantTracks.length,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 4,
+                crossAxisSpacing: 8,
+                mainAxisSpacing: 8,
+                childAspectRatio: 1.6,
               ),
-              color: Colors.grey,
+              itemBuilder: (context, index) {
+                final participantTrack = participantTracks[index];
+                return GestureDetector(
+                  onTap: () => _trigerFocus(participantTrack),
+                  child: ParticipantWidget.widgetFor(participantTrack),
+                );
+              },
             ),
-          );
-        },
+            Row(
+              children: [
+                if (canGoPrev)
+                  IconButton(
+                    color: Colors.red,
+                    icon: const Icon(Icons.arrow_back_ios),
+                    onPressed: () {
+                      setState(() {
+                        currentPage--;
+                        _sortParticipants();
+                      });
+                    },
+                  ),
+                const Spacer(),
+                if (canGoNext)
+                  IconButton(
+                    icon: const Icon(Icons.arrow_forward_ios),
+                    onPressed: () {
+                      setState(() {
+                        currentPage++;
+                        _sortParticipants();
+                      });
+                    },
+                  ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
-}
-
-class _StaticGrid extends StatelessWidget {
-  const _StaticGrid({
-    required this.itemCount,
-    required this.columns,
-    required this.rows,
-    required this.verticalSpacing,
-    required this.horizontalSpacing,
-    required this.itemBuilder,
-    required this.emptyBuilder,
-  });
-
-  final int itemCount;
-  final int columns;
-  final int rows;
-  final double verticalSpacing;
-  final double horizontalSpacing;
-  final Widget Function(int index) itemBuilder;
-  final Widget Function() emptyBuilder;
-
-  @override
-  Widget build(BuildContext context) {
-    final grid = <Widget>[];
-
-    if (itemCount == 1) {
-      // return single element taking all available space
-      return itemBuilder(0);
-    }
-
-    if (itemCount == 2) {
-      for (var i = 0; i < rows; i++) {
-        grid.add(
-          Expanded(
-            child: AspectRatio(
-              aspectRatio: 1.6,
-              child: itemBuilder(i),
-            ),
-          ),
-        );
-      }
-
-      return Row(
-        children: grid
-            .intersperse(
-              SizedBox(
-                width: horizontalSpacing,
-              ),
-            )
-            .toList(),
-      );
-    }
-
-    var currentIndex = 0;
-
-    for (var i = 0; i < columns; i++) {
-      final row = <Widget>[];
-
-      for (var j = 0; j < rows; j++) {
-        final index = currentIndex++;
-        row.add(
-          Expanded(
-            child: index < itemCount ? itemBuilder(index) : emptyBuilder(),
-          ),
-        );
-      }
-
-      grid.add(
-        Expanded(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: row
-                .intersperse(
-                  SizedBox(
-                    width: horizontalSpacing,
-                  ),
-                )
-                .toList(),
-          ),
-        ),
-      );
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: grid
-          .intersperse(
-            SizedBox(
-              height: verticalSpacing,
-            ),
-          )
-          .toList(),
-    );
-  }
-}
-
-extension on List<Widget> {
-  Iterable<Widget> intersperse(Widget element) sync* {
-    final iterator = this.iterator;
-    if (iterator.moveNext()) {
-      yield iterator.current;
-      while (iterator.moveNext()) {
-        yield element;
-        yield iterator.current;
-      }
-    }
-  }
-}
-
-(int, int) _getGridDimens(int participantsCount) {
-  final columns = math.sqrt(participantsCount).ceil();
-  final rows =
-      columns * (columns - 1) >= participantsCount ? columns - 1 : columns;
-
-  return (columns, rows);
 }
